@@ -20,6 +20,7 @@ import _ "github.com/lib/pq"
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	isDevPlatform  bool
 }
 
 func main() {
@@ -27,6 +28,11 @@ func main() {
 
 	godotenv.Load()
 	dbUrl := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
+	if platform == "dev" {
+		fmt.Println("Warning: running as dev environment")
+		cfg.isDevPlatform = true
+	}
 	db, err := sql.Open("postgres", dbUrl)
 	if err != nil {
 		fmt.Println("Erorr: %v", err)
@@ -40,9 +46,10 @@ func main() {
 
 	serveMux := http.NewServeMux()
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
-	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetStatsHandler))
+	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
 	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
 	serveMux.Handle("POST /api/validate_chirp", http.HandlerFunc(chirpValidatorHandler))
+	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
 	serveMux.Handle("/app/", cfg.middlewareMetricsInc(
 		http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 
@@ -79,11 +86,141 @@ func (cfg *apiConfig) getStatsHandler(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits.Load())))
 }
 
-func (cfg *apiConfig) resetStatsHandler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
+	type response struct {
+		Error string `json:"error"`
+	}
+	resp := response{}
+
+	if !cfg.isDevPlatform {
+		log.Printf("Resetting is forbidden outside dev")
+		resp.Error = "Forbidden outside dev"
+		res, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshaling json: %v", err)
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(403)
+		w.Write(res)
+		return
+	}
+
+	_, err := cfg.dbQueries.ResetUsers(r.Context())
+	if err != nil {
+		log.Printf("Error deleting users: %v", err)
+		resp.Error = "Error deleting users"
+		res, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshaling json: %v", err)
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(res)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
 	cfg.fileserverHits.Store(0)
 	w.Write([]byte{})
+}
+
+func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) {
+	type user struct {
+		Email string `json:email`
+	}
+
+	type response struct {
+		Error     string `json:"error,omitempty"`
+		Id        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email     string `json:"email"`
+	}
+
+	resp := response{}
+
+	body := r.Body
+	content, err := io.ReadAll(body)
+	if err != nil {
+		log.Printf("Error reading request: %v", err)
+		resp.Error = "Failed to read request"
+		res, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshaling json: %v", err)
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(res)
+		return
+	}
+
+	req := user{}
+	err = json.Unmarshal(content, &req)
+	if err != nil {
+		log.Printf("Error unmarshalling request: %v", err)
+		resp.Error = "Error decoding json"
+		res, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshaling json: %v", err)
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(res)
+		return
+	}
+
+	dbStatus, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
+	if err != nil {
+		log.Printf("Error creating user: %v", err)
+		resp.Error = "Error creating user"
+		res, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshaling json: %v", err)
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(res)
+		return
+	}
+
+	fmt.Printf("Decoded request: %v\n", req)
+	fmt.Printf("Database response: %v\n", dbStatus)
+
+	resp.Id = dbStatus.ID.String()
+	resp.CreatedAt = dbStatus.CreatedAt.String()
+	resp.UpdatedAt = dbStatus.UpdatedAt.String()
+	resp.Email = dbStatus.Email
+
+	respJson, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("Error generating response: %v", err)
+		resp.Error = "Error generating response"
+		res, err := json.Marshal(resp)
+		if err != nil {
+			log.Printf("Error marshaling json: %v", err)
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(res)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	w.Write(respJson)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
