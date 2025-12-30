@@ -33,11 +33,12 @@ func chirpySendErrorResponse(w http.ResponseWriter,
 }
 
 type chirpyEncodedJsonResponse struct {
-	data       []byte // should always contain valid json
+	data       []byte // Should always contain valid json
 	statusCode int    // Needed for returning error status codes
 }
 
-// Returns sendable response with statusCode set to 500 when an error is encountered
+// Always returns a sendable response
+// statusCode and data are set appropriately to indicate errors
 func chirpyEncodeJsonResponse(statusCode int, t any) (chirpyEncodedJsonResponse, error) {
 	res := chirpyEncodedJsonResponse{
 		data:       []byte(`{"error":"unexpected failure"}`),
@@ -61,6 +62,7 @@ func chirpySendResponse(w http.ResponseWriter, res chirpyEncodedJsonResponse) {
 	w.Write(res.data)
 }
 
+// todo: return a sendable error response instead of error
 func chirpyDecodeJsonRequest(r *http.Request, t any) error {
 	content, err := io.ReadAll(r.Body)
 	if err != nil {

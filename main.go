@@ -2,9 +2,7 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -15,7 +13,7 @@ import (
 
 	"github.com/joho/godotenv"
 )
-import _ "github.com/lib/pq"
+import "github.com/lib/pq"
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
@@ -87,39 +85,14 @@ func (cfg *apiConfig) getStatsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
-	type response struct {
-		Error string `json:"error"`
-	}
-	resp := response{}
-
 	if !cfg.isDevPlatform {
-		log.Printf("Resetting is forbidden outside dev")
-		resp.Error = "Forbidden outside dev"
-		res, err := json.Marshal(resp)
-		if err != nil {
-			log.Printf("Error marshaling json: %v", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(403)
-		w.Write(res)
+		chirpySendErrorResponse(w, 500, "Not a dev environment", nil)
 		return
 	}
 
 	_, err := cfg.dbQueries.ResetUsers(r.Context())
 	if err != nil {
-		log.Printf("Error deleting users: %v", err)
-		resp.Error = "Error deleting users"
-		res, err := json.Marshal(resp)
-		if err != nil {
-			log.Printf("Error marshaling json: %v", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(res)
+		chirpySendErrorResponse(w, 500, "Failed to delete users", err)
 		return
 	}
 
@@ -145,17 +118,24 @@ func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) 
 	req := user{}
 
 	err := chirpyDecodeJsonRequest(r, &req)
-
-	fmt.Printf("error: %v, user: %#v\n", err, req)
-
-	dbStatus, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
 	if err != nil {
-		chirpySendErrorResponse(w, 500, "Error creating user", err)
+		chirpySendErrorResponse(w, 500, "Failed to read request", err)
 		return
 	}
 
-	fmt.Printf("Decoded request: %v\n", req)
-	fmt.Printf("Database response: %v\n", dbStatus)
+	dbStatus, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
+	if err != nil {
+		e, ok := err.(*pq.Error)
+		if ok &&
+			e.Code.Name() == "unique_violation" &&
+			e.Constraint == "users_email_key" {
+
+			chirpySendErrorResponse(w, 500, "User already exists", e)
+			return
+		}
+		chirpySendErrorResponse(w, 500, "Error creating user", e)
+		return
+	}
 
 	createdUser.Id = dbStatus.ID.String()
 	createdUser.CreatedAt = dbStatus.CreatedAt.String()
@@ -188,38 +168,11 @@ func chirpValidatorHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := apiSuccess{}
-
-	body := r.Body
-	content, err := io.ReadAll(body)
-	if err != nil {
-		log.Printf("Error reading request: %v", err)
-		response.Error = fmt.Sprintf("Error reading request")
-		res, err := json.Marshal(response)
-		if err != nil {
-			log.Printf("Error marshaling json: %v", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(res)
-		return
-	}
-
 	c := chirp{}
-	err = json.Unmarshal(content, &c)
+
+	err := chirpyDecodeJsonRequest(r, &c)
 	if err != nil {
-		log.Printf("Error decodign json: %v", err)
-		response.Error = fmt.Sprintf("Error decoding json")
-		res, err := json.Marshal(response)
-		if err != nil {
-			log.Printf("Error marshaling json: %v", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(res)
+		chirpySendErrorResponse(w, 500, "Failed to read request", err)
 		return
 	}
 
@@ -254,14 +207,11 @@ func chirpValidatorHandler(w http.ResponseWriter, r *http.Request) {
 		response.CleanedBody = strings.Join(newWords, " ")
 	}
 
-	res, err := json.Marshal(response)
+	res, err := chirpyEncodeJsonResponse(status, response)
 	if err != nil {
-		log.Printf("Error marshaling json: %v", err)
-		w.WriteHeader(500)
-		return
+		log.Printf("Error: %v", err)
+		// continue
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	w.Write(res)
+	chirpySendResponse(w, res)
 }
