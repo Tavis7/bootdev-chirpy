@@ -35,7 +35,7 @@ func main() {
 	}
 	db, err := sql.Open("postgres", dbUrl)
 	if err != nil {
-		fmt.Println("Erorr: %v", err)
+		fmt.Println("Error: %v", err)
 		return
 	}
 	cfg.dbQueries = database.New(db)
@@ -135,92 +135,40 @@ func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	type response struct {
-		Error     string `json:"error,omitempty"`
 		Id        string `json:"id"`
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 		Email     string `json:"email"`
 	}
 
-	resp := response{}
-
-	body := r.Body
-	content, err := io.ReadAll(body)
-	if err != nil {
-		log.Printf("Error reading request: %v", err)
-		resp.Error = "Failed to read request"
-		res, err := json.Marshal(resp)
-		if err != nil {
-			log.Printf("Error marshaling json: %v", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(res)
-		return
-	}
-
+	createdUser := response{}
 	req := user{}
-	err = json.Unmarshal(content, &req)
-	if err != nil {
-		log.Printf("Error unmarshalling request: %v", err)
-		resp.Error = "Error decoding json"
-		res, err := json.Marshal(resp)
-		if err != nil {
-			log.Printf("Error marshaling json: %v", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(res)
-		return
-	}
+
+	err := chirpyDecodeJsonRequest(r, &req)
+
+	fmt.Printf("error: %v, user: %#v\n", err, req)
 
 	dbStatus, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
 	if err != nil {
-		log.Printf("Error creating user: %v", err)
-		resp.Error = "Error creating user"
-		res, err := json.Marshal(resp)
-		if err != nil {
-			log.Printf("Error marshaling json: %v", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(res)
+		chirpySendErrorResponse(w, 500, "Error creating user", err)
 		return
 	}
 
 	fmt.Printf("Decoded request: %v\n", req)
 	fmt.Printf("Database response: %v\n", dbStatus)
 
-	resp.Id = dbStatus.ID.String()
-	resp.CreatedAt = dbStatus.CreatedAt.String()
-	resp.UpdatedAt = dbStatus.UpdatedAt.String()
-	resp.Email = dbStatus.Email
+	createdUser.Id = dbStatus.ID.String()
+	createdUser.CreatedAt = dbStatus.CreatedAt.String()
+	createdUser.UpdatedAt = dbStatus.UpdatedAt.String()
+	createdUser.Email = dbStatus.Email
 
-	respJson, err := json.Marshal(resp)
+	res, err := chirpyEncodeJsonResponse(201, createdUser)
 	if err != nil {
-		log.Printf("Error generating response: %v", err)
-		resp.Error = "Error generating response"
-		res, err := json.Marshal(resp)
-		if err != nil {
-			log.Printf("Error marshaling json: %v", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(res)
-		return
+		log.Printf("Error: %v", err)
+		// continue
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(201)
-	w.Write(respJson)
+	chirpySendResponse(w, res)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
