@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/lib/pq"
 
@@ -48,11 +49,10 @@ func main() {
 
 	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
 	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
-	serveMux.Handle("POST /api/validate_chirp", http.HandlerFunc(chirpValidatorHandler))
+	serveMux.Handle("POST /api/chirps", http.HandlerFunc(cfg.chirpCreateHandler))
 
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
 	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
-
 
 	server := &http.Server{
 		Handler: serveMux,
@@ -94,6 +94,12 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err := cfg.dbQueries.ResetUsers(r.Context())
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Failed to delete users", err)
+		return
+	}
+
+	_, err = cfg.dbQueries.ResetChirps(r.Context())
 	if err != nil {
 		chirpySendErrorResponse(w, 500, "Failed to delete users", err)
 		return
@@ -160,17 +166,20 @@ func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) 
 	chirpySendResponse(w, res)
 }
 
-func chirpValidatorHandler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request) {
 	type chirp struct {
-		Body string `json:body`
-	}
-	type apiSuccess struct {
-		Error       string `json:"error,omitempty"`
-		Valid       bool   `json:"valid,omitempty"`
-		CleanedBody string `json:"cleaned_body,omitempty"`
+		Body   string `json:"body"`
+		UserID string `json:"user_id"`
 	}
 
-	response := apiSuccess{}
+	type chirpCreateResponse struct {
+		ID        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Body      string `json:"body"`
+		UserID    string `json:user_id`
+	}
+
 	c := chirp{}
 
 	err := chirpyDecodeJsonRequest(r, &c)
@@ -180,8 +189,6 @@ func chirpValidatorHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	const maxChirpLength = 140
-	response.Valid = true
-	status := 200
 	words := strings.Split(c.Body, " ")
 	newWords := []string{}
 	badWords := []string{
@@ -201,16 +208,33 @@ func chirpValidatorHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(c.Body) > maxChirpLength {
-		response.Valid = false
-		response.Error = "Chirp is too long"
-		status = 400
+		chirpySendErrorResponse(w, 400, "Chirp is too long", nil)
+		return
 	}
 
-	if response.Valid {
-		response.CleanedBody = strings.Join(newWords, " ")
+	cleanedBody := strings.Join(newWords, " ")
+
+	userID, err := uuid.Parse(c.UserID)
+	if err != nil {
+		chirpySendErrorResponse(w, 400, "Invalid UUID", err)
+		return
 	}
 
-	res, err := chirpyEncodeJsonResponse(status, response)
+	dbStatus, err := cfg.dbQueries.CreateChirp(r.Context(),
+		database.CreateChirpParams{
+			cleanedBody,
+			userID,
+		})
+
+	response := chirpCreateResponse{
+		ID:        dbStatus.ID.String(),
+		CreatedAt: dbStatus.CreatedAt.String(),
+		UpdatedAt: dbStatus.UpdatedAt.String(),
+		Body:      dbStatus.Body,
+		UserID:    dbStatus.UserID.String(),
+	}
+
+	res, err := chirpyEncodeJsonResponse(201, response)
 	if err != nil {
 		log.Printf("Error: %v", err)
 		// continue
