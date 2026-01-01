@@ -50,6 +50,7 @@ func main() {
 	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
 	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
 	serveMux.Handle("POST /api/chirps", http.HandlerFunc(cfg.chirpCreateHandler))
+	serveMux.Handle("GET /api/chirps", http.HandlerFunc(cfg.chirpGetHandler))
 
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
 	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
@@ -166,20 +167,15 @@ func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) 
 	chirpySendResponse(w, res)
 }
 
+type chirp struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	Body      string `json:"body"`
+	UserID    string `json:"user_id"`
+}
+
 func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request) {
-	type chirp struct {
-		Body   string `json:"body"`
-		UserID string `json:"user_id"`
-	}
-
-	type chirpCreateResponse struct {
-		ID        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Body      string `json:"body"`
-		UserID    string `json:user_id`
-	}
-
 	c := chirp{}
 
 	err := chirpyDecodeJsonRequest(r, &c)
@@ -226,7 +222,7 @@ func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request)
 			userID,
 		})
 
-	response := chirpCreateResponse{
+	response := chirp{
 		ID:        dbStatus.ID.String(),
 		CreatedAt: dbStatus.CreatedAt.String(),
 		UpdatedAt: dbStatus.UpdatedAt.String(),
@@ -235,6 +231,34 @@ func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	res, err := chirpyEncodeJsonResponse(201, response)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		// continue
+	}
+
+	chirpySendResponse(w, res)
+}
+
+func (cfg *apiConfig) chirpGetHandler(w http.ResponseWriter, r *http.Request) {
+	dbStatus, err := cfg.dbQueries.GetAllChirps(r.Context())
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Failed to get chirps", err)
+		return
+	}
+
+	response := []chirp{}
+
+	for _, c := range dbStatus {
+		response = append(response, chirp{
+			ID:        c.ID.String(),
+			CreatedAt: c.CreatedAt.String(),
+			UpdatedAt: c.UpdatedAt.String(),
+			Body:      c.Body,
+			UserID:    c.UserID.String(),
+		})
+	}
+
+	res, err := chirpyEncodeJsonResponse(200, response)
 	if err != nil {
 		log.Printf("Error: %v", err)
 		// continue

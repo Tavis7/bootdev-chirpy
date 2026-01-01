@@ -9,6 +9,9 @@ VALUES (
 )
 RETURNING *;
 
+-- name: GetAllChirps :many
+SELECT * FROM chirps;
+
 -- name: ResetChirps :many
 DELETE FROM chirps *
 RETURNING *;
