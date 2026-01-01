@@ -9,11 +9,11 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/Tavis7/bootdev-chirpy/internal/database"
-
 	"github.com/joho/godotenv"
+	"github.com/lib/pq"
+
+	"github.com/Tavis7/bootdev-chirpy/internal/database"
 )
-import "github.com/lib/pq"
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
@@ -43,13 +43,16 @@ func main() {
 	fmt.Printf("DB queries: %v\n", cfg.dbQueries)
 
 	serveMux := http.NewServeMux()
-	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
-	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
-	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
-	serveMux.Handle("POST /api/validate_chirp", http.HandlerFunc(chirpValidatorHandler))
-	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
 	serveMux.Handle("/app/", cfg.middlewareMetricsInc(
 		http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
+
+	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
+	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
+	serveMux.Handle("POST /api/validate_chirp", http.HandlerFunc(chirpValidatorHandler))
+
+	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
+	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
+
 
 	server := &http.Server{
 		Handler: serveMux,
@@ -102,6 +105,12 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte{})
 }
 
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write([]byte("OK"))
+}
+
 func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) {
 	type user struct {
 		Email string `json:email`
@@ -149,12 +158,6 @@ func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	chirpySendResponse(w, res)
-}
-
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
-	w.Write([]byte("OK"))
 }
 
 func chirpValidatorHandler(w http.ResponseWriter, r *http.Request) {
