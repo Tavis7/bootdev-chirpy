@@ -10,7 +10,7 @@ VALUES (
 RETURNING *;
 
 -- name: GetAllChirps :many
-SELECT * FROM chirps;
+SELECT * FROM chirps ORDER BY created_at ASC;
 
 -- name: ResetChirps :many
 DELETE FROM chirps *
