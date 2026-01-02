@@ -2,7 +2,6 @@ package auth
 
 import (
 	"testing"
-	"fmt"
 )
 
 var p = "pa$$word"
@@ -15,7 +14,6 @@ func TestHashPassword(t *testing.T) {
 	if len(h) <= 0 {
 		t.Errorf("empty hash: %v", h)
 	}
-	fmt.Printf("'%v' => '%v'\n", p, h)
 }
 
 func TestCheckPasswordHash(t *testing.T) {
