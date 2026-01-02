@@ -14,6 +14,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/Tavis7/bootdev-chirpy/internal/database"
+	"github.com/Tavis7/bootdev-chirpy/internal/auth"
 )
 
 type apiConfig struct {
@@ -34,7 +35,7 @@ func main() {
 	}
 	db, err := sql.Open("postgres", dbUrl)
 	if err != nil {
-		fmt.Println("Error: %v", err)
+		fmt.Printf("Error: %v\n", err)
 		return
 	}
 	cfg.dbQueries = database.New(db)
@@ -48,9 +49,14 @@ func main() {
 		http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 
 	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
+
 	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
+	serveMux.Handle("POST /api/login", http.HandlerFunc(cfg.userLoginHandler))
+
 	serveMux.Handle("POST /api/chirps", http.HandlerFunc(cfg.chirpCreateHandler))
-	serveMux.Handle("GET /api/chirps", http.HandlerFunc(cfg.chirpGetHandler))
+	serveMux.Handle("GET /api/chirps", http.HandlerFunc(cfg.chirpsGetHandler))
+	serveMux.Handle("GET /api/chirps/{id}", http.HandlerFunc(cfg.chirpGetHandler))
+
 
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
 	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
@@ -62,7 +68,7 @@ func main() {
 
 	err = server.ListenAndServe()
 	if err != nil {
-		fmt.Println("Error: %v", err)
+		fmt.Printf("Error: %v\n", err)
 		return
 	}
 }
@@ -90,7 +96,7 @@ func (cfg *apiConfig) getStatsHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	if !cfg.isDevPlatform {
-		chirpySendErrorResponse(w, 500, "Not a dev environment", nil)
+		chirpySendErrorResponse(w, 403, "Not a dev environment", nil)
 		return
 	}
 
@@ -118,47 +124,108 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+type userAuthInfo struct {
+	Email string `json:email`
+	Password string `json:password`
+}
+
+type chirpyUserInfo struct {
+	Id        string `json:"id"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+	Email     string `json:"email"`
+}
+
+
 func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) {
-	type user struct {
-		Email string `json:email`
-	}
-
-	type response struct {
-		Id        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
-	}
-
-	createdUser := response{}
-	req := user{}
+	req := userAuthInfo{}
 
 	err := chirpyDecodeJsonRequest(r, &req)
 	if err != nil {
-		chirpySendErrorResponse(w, 500, "Failed to read request", err)
+		chirpySendErrorResponse(w, 400, "Invalid request", err)
 		return
 	}
 
-	dbStatus, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
+	if len(req.Password) == 0 {
+		chirpySendErrorResponse(w, 400, "Password required", err)
+		return
+	}
+
+	passwordHash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Failed to create user", err)
+		return
+	}
+
+	dbUserRow, err := cfg.dbQueries.CreateUser(r.Context(),
+	database.CreateUserParams{
+		req.Email,
+		passwordHash,
+	})
 	if err != nil {
 		e, ok := err.(*pq.Error)
 		if ok &&
 			e.Code.Name() == "unique_violation" &&
 			e.Constraint == "users_email_key" {
 
-			chirpySendErrorResponse(w, 500, "User already exists", e)
+			chirpySendErrorResponse(w, 400, "User already exists", e)
 			return
 		}
 		chirpySendErrorResponse(w, 500, "Error creating user", e)
 		return
 	}
 
-	createdUser.Id = dbStatus.ID.String()
-	createdUser.CreatedAt = dbStatus.CreatedAt.String()
-	createdUser.UpdatedAt = dbStatus.UpdatedAt.String()
-	createdUser.Email = dbStatus.Email
+	createdUser := chirpyUserInfo{
+		Id: dbUserRow.ID.String(),
+		CreatedAt: dbUserRow.CreatedAt.String(),
+		UpdatedAt: dbUserRow.UpdatedAt.String(),
+		Email: dbUserRow.Email,
+	}
 
 	res, err := chirpyEncodeJsonResponse(201, createdUser)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		// continue
+	}
+
+	chirpySendResponse(w, res)
+}
+
+func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
+	req := userAuthInfo{}
+
+	err := chirpyDecodeJsonRequest(r, &req)
+	if err != nil {
+		chirpySendErrorResponse(w, 400, "Invalid request", err)
+		return
+	}
+
+	dbUserRow, err := cfg.dbQueries.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		// todo Some errors should 500
+		chirpySendErrorResponse(w, 401, "Incorrect email or password", err)
+		return
+	}
+
+	matches, err := auth.CheckPasswordHash(req.Password, dbUserRow.HashedPassword)
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Authentication failed", err)
+		return
+	}
+
+	if !matches{
+		chirpySendErrorResponse(w, 401, "Incorrect email or password", err)
+		return
+	}
+
+	createdUser := chirpyUserInfo{
+		Id: dbUserRow.ID.String(),
+		CreatedAt: dbUserRow.CreatedAt.String(),
+		UpdatedAt: dbUserRow.UpdatedAt.String(),
+		Email: dbUserRow.Email,
+	}
+
+	res, err := chirpyEncodeJsonResponse(200, createdUser)
 	if err != nil {
 		log.Printf("Error: %v", err)
 		// continue
@@ -180,7 +247,7 @@ func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request)
 
 	err := chirpyDecodeJsonRequest(r, &c)
 	if err != nil {
-		chirpySendErrorResponse(w, 500, "Failed to read request", err)
+		chirpySendErrorResponse(w, 400, "Invalid request", err)
 		return
 	}
 
@@ -239,7 +306,7 @@ func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request)
 	chirpySendResponse(w, res)
 }
 
-func (cfg *apiConfig) chirpGetHandler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) chirpsGetHandler(w http.ResponseWriter, r *http.Request) {
 	dbStatus, err := cfg.dbQueries.GetAllChirps(r.Context())
 	if err != nil {
 		chirpySendErrorResponse(w, 500, "Failed to get chirps", err)
@@ -256,6 +323,39 @@ func (cfg *apiConfig) chirpGetHandler(w http.ResponseWriter, r *http.Request) {
 			Body:      c.Body,
 			UserID:    c.UserID.String(),
 		})
+	}
+
+	res, err := chirpyEncodeJsonResponse(200, response)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		// continue
+	}
+
+	chirpySendResponse(w, res)
+}
+
+func (cfg *apiConfig) chirpGetHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	fmt.Printf("Path: %v\n", id)
+
+	chirpID, err := uuid.Parse(id)
+	if err != nil {
+		chirpySendErrorResponse(w, 404, "Chirp not found", err)
+		return
+	}
+
+	dbStatus, err := cfg.dbQueries.GetChirpByID(r.Context(), chirpID)
+	if err != nil {
+		chirpySendErrorResponse(w, 404, "Chirp not found", err)
+		return
+	}
+
+	response := chirp{
+		ID:        dbStatus.ID.String(),
+		CreatedAt: dbStatus.CreatedAt.String(),
+		UpdatedAt: dbStatus.UpdatedAt.String(),
+		Body:      dbStatus.Body,
+		UserID:    dbStatus.UserID.String(),
 	}
 
 	res, err := chirpyEncodeJsonResponse(200, response)

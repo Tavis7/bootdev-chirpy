@@ -11,4 +11,4 @@ then
     popd
 fi
 
-sqlc generate && go build .
+sqlc generate && go build . && go test -run="nop" ./...
