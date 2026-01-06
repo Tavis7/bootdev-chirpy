@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strings"
@@ -20,7 +21,12 @@ func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (str
 			ExpiresAt: &jwt.NumericDate{expires},
 			Subject:   userID.String(),
 		})
-	key := []byte(tokenSecret)
+
+	key, err := base64.StdEncoding.DecodeString(tokenSecret)
+	if err != nil {
+		return "", err
+	}
+
 	ss, err := token.SignedString(key)
 	if err != nil {
 		return "", err
@@ -31,7 +37,7 @@ func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (str
 func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 
 	keyFunc := func(token *jwt.Token) (any, error) {
-		return []byte(tokenSecret), nil
+		return base64.StdEncoding.DecodeString(tokenSecret)
 	}
 
 	claims := jwt.RegisteredClaims{}

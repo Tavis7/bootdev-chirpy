@@ -7,13 +7,15 @@ import (
 	"time"
 )
 
+var key = "XJaqElLgyOn5Qz1bkyZyDGGPdooJkYnAaw/KAfdoc8txDLwzZxCmobL4Iwsvdp00eIWmYTff9MgGjvxe7E1/Ng=="
+
 func TestMakeJWT(t *testing.T) {
 	// uuid.New()
 	id, err := uuid.Parse("253be0c3-c9e8-4d34-b6a9-9a8211884bc3")
 	if err != nil {
 		t.Errorf("Test is broken: %v", err)
 	}
-	s, err := MakeJWT(id, "abcdef", time.Second*60)
+	s, err := MakeJWT(id, key, time.Second*60)
 	if err != nil {
 		t.Errorf("%v, %v", s, err)
 		return
@@ -26,7 +28,6 @@ func TestMakeClaims(t *testing.T) {
 	if err != nil {
 		t.Errorf("Test is broken: %v", err)
 	}
-	key := "abcdef"
 	s, err := MakeJWT(id, key, time.Second*60)
 	if err != nil {
 		t.Errorf("%v, %v", s, err)
