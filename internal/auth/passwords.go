@@ -6,13 +6,13 @@ import (
 
 func HashPassword(password string) (string, error) {
 	hash, err := argon2id.CreateHash(password,
-	&argon2id.Params{
-		Memory: 800000,
-		Iterations: 1,
-		Parallelism: 1,
-		SaltLength: 16,
-		KeyLength: 16,
-	})
+		&argon2id.Params{
+			Memory:      800000,
+			Iterations:  1,
+			Parallelism: 1,
+			SaltLength:  16,
+			KeyLength:   16,
+		})
 	if err != nil {
 		return "", err
 	}

@@ -1,23 +1,25 @@
 package auth
 
 import (
-	"time"
 	"fmt"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
 
 func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
-	now := time.Now();
+	now := time.Now()
 	expires := now.Add(expiresIn)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256,
-	jwt.RegisteredClaims{
-		Issuer: "chirpy",
-		IssuedAt: &jwt.NumericDate{now},
-		ExpiresAt: &jwt.NumericDate{expires},
-		Subject: userID.String(),
-	})
+		jwt.RegisteredClaims{
+			Issuer:    "chirpy",
+			IssuedAt:  &jwt.NumericDate{now},
+			ExpiresAt: &jwt.NumericDate{expires},
+			Subject:   userID.String(),
+		})
 	key := []byte(tokenSecret)
 	ss, err := token.SignedString(key)
 	if err != nil {
@@ -49,4 +51,23 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	}
 
 	return id, nil
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	header := headers.Get("Authorization")
+	if header == "" {
+		return "", fmt.Errorf("Missing authorization header")
+	}
+
+	prefix := "Bearer "
+	token, ok := strings.CutPrefix(header, prefix)
+	if ok != true {
+		return "", fmt.Errorf("Authorization header missing '%v' prefix: %v",
+			prefix, token)
+	}
+
+	token = strings.TrimSpace(token)
+
+	fmt.Printf("Header: %v\n", header)
+	return token, nil
 }

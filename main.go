@@ -8,37 +8,42 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/lib/pq"
 
-	"github.com/Tavis7/bootdev-chirpy/internal/database"
 	"github.com/Tavis7/bootdev-chirpy/internal/auth"
+	"github.com/Tavis7/bootdev-chirpy/internal/database"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	isDevPlatform  bool
+	jwtSecret      string
 }
 
 func main() {
 	cfg := &apiConfig{}
 
 	godotenv.Load()
-	dbUrl := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	if platform == "dev" {
 		fmt.Println("Warning: running as dev environment")
 		cfg.isDevPlatform = true
 	}
+
+	dbUrl := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbUrl)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 	cfg.dbQueries = database.New(db)
+
+	cfg.jwtSecret = os.Getenv("JWT_SECRET")
 
 	fmt.Println("Starting server")
 	fmt.Printf("DB url: %v\n", dbUrl)
@@ -56,7 +61,6 @@ func main() {
 	serveMux.Handle("POST /api/chirps", http.HandlerFunc(cfg.chirpCreateHandler))
 	serveMux.Handle("GET /api/chirps", http.HandlerFunc(cfg.chirpsGetHandler))
 	serveMux.Handle("GET /api/chirps/{id}", http.HandlerFunc(cfg.chirpGetHandler))
-
 
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
 	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
@@ -125,8 +129,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type userAuthInfo struct {
-	Email string `json:email`
-	Password string `json:password`
+	Email            string `"json:email"`
+	Password         string `"json:password"`
+	ExpiresInSeconds int    `json:"expires_in_seconds"`
 }
 
 type chirpyUserInfo struct {
@@ -134,8 +139,8 @@ type chirpyUserInfo struct {
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 	Email     string `json:"email"`
+	Token     string `json:"token,omitempty"`
 }
-
 
 func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) {
 	req := userAuthInfo{}
@@ -158,10 +163,10 @@ func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	dbUserRow, err := cfg.dbQueries.CreateUser(r.Context(),
-	database.CreateUserParams{
-		req.Email,
-		passwordHash,
-	})
+		database.CreateUserParams{
+			req.Email,
+			passwordHash,
+		})
 	if err != nil {
 		e, ok := err.(*pq.Error)
 		if ok &&
@@ -176,10 +181,10 @@ func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	createdUser := chirpyUserInfo{
-		Id: dbUserRow.ID.String(),
+		Id:        dbUserRow.ID.String(),
 		CreatedAt: dbUserRow.CreatedAt.String(),
 		UpdatedAt: dbUserRow.UpdatedAt.String(),
-		Email: dbUserRow.Email,
+		Email:     dbUserRow.Email,
 	}
 
 	res, err := chirpyEncodeJsonResponse(201, createdUser)
@@ -213,16 +218,28 @@ func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !matches{
+	if !matches {
 		chirpySendErrorResponse(w, 401, "Incorrect email or password", err)
 		return
 	}
 
+	hour_in_seconds := 60 * 60
+	if req.ExpiresInSeconds == 0 || req.ExpiresInSeconds > hour_in_seconds {
+		req.ExpiresInSeconds = hour_in_seconds
+	}
+
+	token, err := auth.MakeJWT(dbUserRow.ID, cfg.jwtSecret,
+		time.Second*time.Duration(req.ExpiresInSeconds))
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Failed to generate auth token", err)
+	}
+
 	createdUser := chirpyUserInfo{
-		Id: dbUserRow.ID.String(),
+		Id:        dbUserRow.ID.String(),
 		CreatedAt: dbUserRow.CreatedAt.String(),
 		UpdatedAt: dbUserRow.UpdatedAt.String(),
-		Email: dbUserRow.Email,
+		Email:     dbUserRow.Email,
+		Token:     token,
 	}
 
 	res, err := chirpyEncodeJsonResponse(200, createdUser)
@@ -245,7 +262,19 @@ type chirp struct {
 func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request) {
 	c := chirp{}
 
-	err := chirpyDecodeJsonRequest(r, &c)
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Authorization failed", err)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Authorization failed", err)
+		return
+	}
+
+	err = chirpyDecodeJsonRequest(r, &c)
 	if err != nil {
 		chirpySendErrorResponse(w, 400, "Invalid request", err)
 		return
@@ -276,12 +305,6 @@ func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	cleanedBody := strings.Join(newWords, " ")
-
-	userID, err := uuid.Parse(c.UserID)
-	if err != nil {
-		chirpySendErrorResponse(w, 400, "Invalid UUID", err)
-		return
-	}
 
 	dbStatus, err := cfg.dbQueries.CreateChirp(r.Context(),
 		database.CreateChirpParams{

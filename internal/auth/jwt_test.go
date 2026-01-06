@@ -1,9 +1,10 @@
 package auth
 
 import (
+	"github.com/google/uuid"
+	"net/http"
 	"testing"
 	"time"
-	"github.com/google/uuid"
 )
 
 func TestMakeJWT(t *testing.T) {
@@ -12,7 +13,7 @@ func TestMakeJWT(t *testing.T) {
 	if err != nil {
 		t.Errorf("Test is broken: %v", err)
 	}
-	s, err := MakeJWT(id, "abcdef", time.Second * 60)
+	s, err := MakeJWT(id, "abcdef", time.Second*60)
 	if err != nil {
 		t.Errorf("%v, %v", s, err)
 		return
@@ -26,7 +27,7 @@ func TestMakeClaims(t *testing.T) {
 		t.Errorf("Test is broken: %v", err)
 	}
 	key := "abcdef"
-	s, err := MakeJWT(id, key, time.Second * 60)
+	s, err := MakeJWT(id, key, time.Second*60)
 	if err != nil {
 		t.Errorf("%v, %v", s, err)
 	}
@@ -41,12 +42,37 @@ func TestMakeClaims(t *testing.T) {
 		t.Errorf("Validation reurned wrong ID: %v != %v", id, validatedId)
 	}
 
-
 	validatedId, err = ValidateJWT(s, "wasd")
 	if err == nil {
 		t.Errorf("Validation should error: %v", err)
 	}
 	if validatedId == id {
 		t.Errorf("Validation should error, but: %v == %v", id, validatedId)
+	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+	header := http.Header{}
+	header.Set("Authorization", "Bearer abc")
+	token, err := GetBearerToken(header)
+	if err != nil {
+		t.Errorf("Token expected but got error: %v", err)
+		return
+	}
+
+	if token != "abc" {
+		t.Errorf("Expected 'abc' but got '%v'", token)
+	}
+
+	header = http.Header{}
+	header.Set("Authorization", "Bearer    abc     ")
+	token, err = GetBearerToken(header)
+	if err != nil {
+		t.Errorf("Token expected but got error: %v", err)
+		return
+	}
+
+	if token != "abc" {
+		t.Errorf("Expected 'abc' but got '%v'", token)
 	}
 }
