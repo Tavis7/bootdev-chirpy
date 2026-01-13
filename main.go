@@ -23,6 +23,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	isDevPlatform  bool
 	jwtSecret      string
+	jwtDuration time.Duration
 }
 
 func main() {
@@ -44,6 +45,7 @@ func main() {
 	cfg.dbQueries = database.New(db)
 
 	cfg.jwtSecret = os.Getenv("JWT_SECRET")
+	cfg.jwtDuration = time.Hour * 1
 
 	fmt.Println("Starting server")
 	fmt.Printf("DB url: %v\n", dbUrl)
@@ -57,6 +59,8 @@ func main() {
 
 	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
 	serveMux.Handle("POST /api/login", http.HandlerFunc(cfg.userLoginHandler))
+	serveMux.Handle("POST /api/refresh", http.HandlerFunc(cfg.userAuthRefreshHandler))
+	serveMux.Handle("POST /api/revoke", http.HandlerFunc(cfg.userAuthRevokeHandler))
 
 	serveMux.Handle("POST /api/chirps", http.HandlerFunc(cfg.chirpCreateHandler))
 	serveMux.Handle("GET /api/chirps", http.HandlerFunc(cfg.chirpsGetHandler))
@@ -131,7 +135,6 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 type userAuthInfo struct {
 	Email            string `"json:email"`
 	Password         string `"json:password"`
-	ExpiresInSeconds int    `json:"expires_in_seconds"`
 }
 
 type chirpyUserInfo struct {
@@ -140,6 +143,7 @@ type chirpyUserInfo struct {
 	UpdatedAt string `json:"updated_at"`
 	Email     string `json:"email"`
 	Token     string `json:"token,omitempty"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) {
@@ -223,15 +227,24 @@ func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hour_in_seconds := 60 * 60
-	if req.ExpiresInSeconds == 0 || req.ExpiresInSeconds > hour_in_seconds {
-		req.ExpiresInSeconds = hour_in_seconds
-	}
-
-	token, err := auth.MakeJWT(dbUserRow.ID, cfg.jwtSecret,
-		time.Second*time.Duration(req.ExpiresInSeconds))
+	token, err := auth.MakeJWT(dbUserRow.ID, cfg.jwtSecret, cfg.jwtDuration)
 	if err != nil {
 		chirpySendErrorResponse(w, 500, "Failed to generate auth token", err)
+	}
+
+	refresh_token, err := auth.MakeRefreshToken()
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Failed to generate refresh token", err)
+	}
+
+	_, err = cfg.dbQueries.StoreRefreshToken(r.Context(),
+	database.StoreRefreshTokenParams{
+		refresh_token,
+		dbUserRow.ID,
+		dbUserRow.CreatedAt.Add(time.Hour * 24 * 60),
+	})
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Failed to store refresh token", err)
 	}
 
 	createdUser := chirpyUserInfo{
@@ -240,6 +253,7 @@ func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: dbUserRow.UpdatedAt.String(),
 		Email:     dbUserRow.Email,
 		Token:     token,
+		RefreshToken: refresh_token,
 	}
 
 	res, err := chirpyEncodeJsonResponse(200, createdUser)
@@ -249,6 +263,71 @@ func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chirpySendResponse(w, res)
+}
+
+
+func (cfg *apiConfig) userAuthRefreshHandler(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetRefreshToken(r.Header)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Missing authorization header", err)
+		return
+	}
+
+	dbTokenRow, err := cfg.dbQueries.GetRefreshToken(r.Context(), token)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Token refresh failed", err)
+		return
+	}
+
+	now := time.Now()
+
+	if dbTokenRow.RevokedAt.Valid || now.After(dbTokenRow.ExpiresAt) {
+		chirpySendErrorResponse(w, 401, "Token refresh failed", err)
+		return
+	}
+
+	jwt, err := auth.MakeJWT(dbTokenRow.UserID, cfg.jwtSecret, cfg.jwtDuration)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Token refresh failed", err)
+		return
+	}
+
+	type chirpyJWT struct {
+		Token string `json:"token"`
+	}
+	response := chirpyJWT{
+		Token: jwt,
+	}
+
+	res, err := chirpyEncodeJsonResponse(200, response)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		// continue
+	}
+
+	chirpySendResponse(w, res)
+}
+
+func (cfg *apiConfig) userAuthRevokeHandler(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetRefreshToken(r.Header)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Missing authorization header", err)
+		return
+	}
+
+	dbTokenRow, err := cfg.dbQueries.RevokeRefreshToken(r.Context(), token)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Failed to revoke token", err)
+		return
+	}
+
+	if !dbTokenRow.RevokedAt.Valid {
+		chirpySendErrorResponse(w, 500, "Failed to revoke token", err)
+		return
+	}
+
+	w.WriteHeader(204)
+	w.Write([]byte{})
 }
 
 type chirp struct {
