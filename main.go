@@ -58,13 +58,17 @@ func main() {
 	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
 
 	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
+	serveMux.Handle("PUT /api/users", http.HandlerFunc(cfg.userModifyHandler))
 	serveMux.Handle("POST /api/login", http.HandlerFunc(cfg.userLoginHandler))
 	serveMux.Handle("POST /api/refresh", http.HandlerFunc(cfg.userAuthRefreshHandler))
 	serveMux.Handle("POST /api/revoke", http.HandlerFunc(cfg.userAuthRevokeHandler))
 
-	serveMux.Handle("POST /api/chirps", http.HandlerFunc(cfg.chirpCreateHandler))
 	serveMux.Handle("GET /api/chirps", http.HandlerFunc(cfg.chirpsGetHandler))
+	serveMux.Handle("POST /api/chirps", http.HandlerFunc(cfg.chirpCreateHandler))
 	serveMux.Handle("GET /api/chirps/{id}", http.HandlerFunc(cfg.chirpGetHandler))
+	serveMux.Handle("DELETE /api/chirps/{id}", http.HandlerFunc(cfg.chirpDeleteHandler))
+
+	serveMux.Handle("POST /api/polka/webhooks", http.HandlerFunc(cfg.upgradeUserToChirpyRedHandler))
 
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
 	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
@@ -144,6 +148,7 @@ type chirpyUserInfo struct {
 	Email     string `json:"email"`
 	Token     string `json:"token,omitempty"`
 	RefreshToken string `json:"refresh_token"`
+	IsChirpyRed bool `json:"is_chirpy_red"`
 }
 
 func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) {
@@ -189,9 +194,83 @@ func (cfg *apiConfig) userCreateHandler(w http.ResponseWriter, r *http.Request) 
 		CreatedAt: dbUserRow.CreatedAt.String(),
 		UpdatedAt: dbUserRow.UpdatedAt.String(),
 		Email:     dbUserRow.Email,
+		IsChirpyRed: dbUserRow.IsChirpyRed,
 	}
 
 	res, err := chirpyEncodeJsonResponse(201, createdUser)
+	if err != nil {
+		log.Printf("Error: %v", err)
+		// continue
+	}
+
+	chirpySendResponse(w, res)
+}
+
+func (cfg *apiConfig) userModifyHandler(w http.ResponseWriter, r *http.Request) {
+	req := userAuthInfo{}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Authorization failed", err)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Authorization failed", err)
+		return
+	}
+
+	err = chirpyDecodeJsonRequest(r, &req)
+	if err != nil {
+		chirpySendErrorResponse(w, 400, "Invalid request", err)
+		return
+	}
+
+	if len(req.Password) == 0 {
+		chirpySendErrorResponse(w, 400, "Password required", err)
+		return
+	}
+
+	if len(req.Email) == 0 {
+		chirpySendErrorResponse(w, 400, "Email required", err)
+		return
+	}
+
+	passwordHash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Failed to update user", err)
+		return
+	}
+
+	dbUserRow, err := cfg.dbQueries.UpdateUserEmailAndPassword(r.Context(),
+		database.UpdateUserEmailAndPasswordParams{
+			userID,
+			req.Email,
+			passwordHash,
+		})
+	if err != nil {
+		e, ok := err.(*pq.Error)
+		if ok &&
+			e.Code.Name() == "unique_violation" &&
+			e.Constraint == "users_email_key" {
+
+			chirpySendErrorResponse(w, 400, "User already exists", e)
+			return
+		}
+		chirpySendErrorResponse(w, 500, "Error creating user", e)
+		return
+	}
+
+	updatedUser := chirpyUserInfo{
+		Id:        dbUserRow.ID.String(),
+		CreatedAt: dbUserRow.CreatedAt.String(),
+		UpdatedAt: dbUserRow.UpdatedAt.String(),
+		Email:     dbUserRow.Email,
+		IsChirpyRed: dbUserRow.IsChirpyRed,
+	}
+
+	res, err := chirpyEncodeJsonResponse(200, updatedUser)
 	if err != nil {
 		log.Printf("Error: %v", err)
 		// continue
@@ -254,6 +333,7 @@ func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
 		Email:     dbUserRow.Email,
 		Token:     token,
 		RefreshToken: refresh_token,
+		IsChirpyRed: dbUserRow.IsChirpyRed,
 	}
 
 	res, err := chirpyEncodeJsonResponse(200, createdUser)
@@ -436,6 +516,54 @@ func (cfg *apiConfig) chirpsGetHandler(w http.ResponseWriter, r *http.Request) {
 	chirpySendResponse(w, res)
 }
 
+func (cfg *apiConfig) chirpDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Authorization failed", err)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Authorization failed", err)
+		return
+	}
+
+	id := r.PathValue("id")
+	fmt.Printf("Path: %v\n", id)
+
+	chirpID, err := uuid.Parse(id)
+	if err != nil {
+		chirpySendErrorResponse(w, 404, "Chirp not found", err)
+		return
+	}
+
+	dbChirpRow, err := cfg.dbQueries.GetChirpByID(r.Context(), chirpID)
+	if err != nil {
+		chirpySendErrorResponse(w, 404, "Chirp not found", err)
+		return
+	}
+
+	if dbChirpRow.UserID != userID {
+		chirpySendErrorResponse(w, 403, "Unauthorized", err)
+		return
+	}
+
+	_, err = cfg.dbQueries.DeleteChirpByID(r.Context(),
+	database.DeleteChirpByIDParams{
+		chirpID,
+		userID,
+	})
+
+	if err != nil {
+		chirpySendErrorResponse(w, 500, "Failed to delete chirp", err)
+		return
+	}
+
+	w.WriteHeader(204)
+	w.Write([]byte{})
+}
+
 func (cfg *apiConfig) chirpGetHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	fmt.Printf("Path: %v\n", id)
@@ -467,4 +595,52 @@ func (cfg *apiConfig) chirpGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chirpySendResponse(w, res)
+}
+
+func (cfg *apiConfig) upgradeUserToChirpyRedHandler(w http.ResponseWriter, r *http.Request) {
+	type chirpyRedWebhook struct{
+		Event string `json:"event"`
+		Data struct{
+			UserID string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	req := chirpyRedWebhook{}
+
+	err := chirpyDecodeJsonRequest(r, &req)
+	if err != nil {
+		chirpySendErrorResponse(w, 400, "Invalid request", err)
+		return
+	}
+
+	if req.Event != "user.upgraded" {
+		w.WriteHeader(204)
+		w.Write([]byte{})
+		return
+	}
+
+	userID, err := uuid.Parse(req.Data.UserID)
+	if err != nil {
+		chirpySendErrorResponse(w, 400, "Invalid request", err)
+		return
+	}
+
+	if req.Event == "user.upgraded" {
+		dbUserRow, err := cfg.dbQueries.UpgradeToChirpyRed(r.Context(), userID)
+		if err != nil {
+			chirpySendErrorResponse(w, 404, "Not found", err)
+			return
+		}
+
+		if !dbUserRow.IsChirpyRed {
+			chirpySendErrorResponse(w, 500, "Failed to update user", err)
+			return
+		}
+
+		w.WriteHeader(204)
+		w.Write([]byte{})
+		return
+	}
+
+	chirpySendErrorResponse(w, 404, "Unknown event", nil)
 }
