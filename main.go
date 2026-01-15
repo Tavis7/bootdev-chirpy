@@ -492,15 +492,34 @@ func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (cfg *apiConfig) chirpsGetHandler(w http.ResponseWriter, r *http.Request) {
-	dbStatus, err := cfg.dbQueries.GetAllChirps(r.Context())
-	if err != nil {
-		chirpySendErrorResponse(w, 500, "Failed to get chirps", err)
-		return
+	authorID := r.URL.Query().Get("author_id")
+
+	dbChirps := []database.Chirp{}
+
+	if len(authorID) > 0 {
+		authorID, err := uuid.Parse(authorID)
+		if err != nil {
+			chirpySendErrorResponse(w, 400, "Invalid author id", err)
+			return
+		}
+		dbChirps, err = cfg.dbQueries.GetChirpsByAuthorID(r.Context(), authorID)
+		if err != nil {
+			chirpySendErrorResponse(w, 500, "Failed to get chirps", err)
+			return
+		}
+	} else {
+		var err error = nil
+		dbChirps, err = cfg.dbQueries.GetAllChirps(r.Context())
+		if err != nil {
+			chirpySendErrorResponse(w, 500, "Failed to get chirps", err)
+			return
+		}
 	}
+
 
 	response := []chirp{}
 
-	for _, c := range dbStatus {
+	for _, c := range dbChirps {
 		response = append(response, chirp{
 			ID:        c.ID.String(),
 			CreatedAt: c.CreatedAt.String(),
