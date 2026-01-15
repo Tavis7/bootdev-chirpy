@@ -24,6 +24,7 @@ type apiConfig struct {
 	isDevPlatform  bool
 	jwtSecret      string
 	jwtDuration time.Duration
+	polkaApiKey string
 }
 
 func main() {
@@ -46,6 +47,8 @@ func main() {
 
 	cfg.jwtSecret = os.Getenv("JWT_SECRET")
 	cfg.jwtDuration = time.Hour * 1
+
+	cfg.polkaApiKey = os.Getenv("POLKA_API_KEY")
 
 	fmt.Println("Starting server")
 	fmt.Printf("DB url: %v\n", dbUrl)
@@ -347,7 +350,7 @@ func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
 
 
 func (cfg *apiConfig) userAuthRefreshHandler(w http.ResponseWriter, r *http.Request) {
-	token, err := auth.GetRefreshToken(r.Header)
+	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		chirpySendErrorResponse(w, 401, "Missing authorization header", err)
 		return
@@ -389,7 +392,7 @@ func (cfg *apiConfig) userAuthRefreshHandler(w http.ResponseWriter, r *http.Requ
 }
 
 func (cfg *apiConfig) userAuthRevokeHandler(w http.ResponseWriter, r *http.Request) {
-	token, err := auth.GetRefreshToken(r.Header)
+	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
 		chirpySendErrorResponse(w, 401, "Missing authorization header", err)
 		return
@@ -605,9 +608,18 @@ func (cfg *apiConfig) upgradeUserToChirpyRedHandler(w http.ResponseWriter, r *ht
 		} `json:"data"`
 	}
 
+	key, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		chirpySendErrorResponse(w, 401, "Authorization failed", err)
+	}
+	if key != cfg.polkaApiKey {
+		chirpySendErrorResponse(w, 401, "Authorization failed", fmt.Errorf("API keys don't match: '%v'", key))
+		return
+	}
+
 	req := chirpyRedWebhook{}
 
-	err := chirpyDecodeJsonRequest(r, &req)
+	err = chirpyDecodeJsonRequest(r, &req)
 	if err != nil {
 		chirpySendErrorResponse(w, 400, "Invalid request", err)
 		return
@@ -642,5 +654,5 @@ func (cfg *apiConfig) upgradeUserToChirpyRedHandler(w http.ResponseWriter, r *ht
 		return
 	}
 
-	chirpySendErrorResponse(w, 404, "Unknown event", nil)
+	chirpySendErrorResponse(w, 204, "Unknown event", nil)
 }
