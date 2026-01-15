@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -55,26 +56,27 @@ func main() {
 	fmt.Printf("DB queries: %v\n", cfg.dbQueries)
 
 	serveMux := http.NewServeMux()
-	serveMux.Handle("/app/", cfg.middlewareMetricsInc(
-		http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
-
-	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
-
-	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
-	serveMux.Handle("PUT /api/users", http.HandlerFunc(cfg.userModifyHandler))
-	serveMux.Handle("POST /api/login", http.HandlerFunc(cfg.userLoginHandler))
-	serveMux.Handle("POST /api/refresh", http.HandlerFunc(cfg.userAuthRefreshHandler))
-	serveMux.Handle("POST /api/revoke", http.HandlerFunc(cfg.userAuthRevokeHandler))
 
 	serveMux.Handle("GET /api/chirps", http.HandlerFunc(cfg.chirpsGetHandler))
 	serveMux.Handle("POST /api/chirps", http.HandlerFunc(cfg.chirpCreateHandler))
 	serveMux.Handle("GET /api/chirps/{id}", http.HandlerFunc(cfg.chirpGetHandler))
 	serveMux.Handle("DELETE /api/chirps/{id}", http.HandlerFunc(cfg.chirpDeleteHandler))
 
+	serveMux.Handle("POST /api/users", http.HandlerFunc(cfg.userCreateHandler))
+	serveMux.Handle("PUT /api/users", http.HandlerFunc(cfg.userModifyHandler))
+
+	serveMux.Handle("POST /api/login", http.HandlerFunc(cfg.userLoginHandler))
+	serveMux.Handle("POST /api/refresh", http.HandlerFunc(cfg.userAuthRefreshHandler))
+	serveMux.Handle("POST /api/revoke", http.HandlerFunc(cfg.userAuthRevokeHandler))
+
 	serveMux.Handle("POST /api/polka/webhooks", http.HandlerFunc(cfg.upgradeUserToChirpyRedHandler))
+	serveMux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
 
 	serveMux.Handle("GET /admin/metrics", http.HandlerFunc(cfg.getStatsHandler))
 	serveMux.Handle("POST /admin/reset", http.HandlerFunc(cfg.resetHandler))
+
+	serveMux.Handle("/app/", cfg.middlewareMetricsInc(
+		http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 
 	server := &http.Server{
 		Handler: serveMux,
@@ -494,6 +496,15 @@ func (cfg *apiConfig) chirpCreateHandler(w http.ResponseWriter, r *http.Request)
 func (cfg *apiConfig) chirpsGetHandler(w http.ResponseWriter, r *http.Request) {
 	authorID := r.URL.Query().Get("author_id")
 
+	sortBy := r.URL.Query().Get("sort")
+
+	if sortBy != "asc" && sortBy != "desc" {
+		chirpySendErrorResponse(w, 400, "Invalid sort parameter", nil)
+		return
+	}
+
+	sortAsc := sortBy == "asc"
+
 	dbChirps := []database.Chirp{}
 
 	if len(authorID) > 0 {
@@ -515,6 +526,10 @@ func (cfg *apiConfig) chirpsGetHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	sort.Slice(dbChirps, func(i, j int) bool {
+		return sortAsc == dbChirps[i].CreatedAt.Before(dbChirps[j].CreatedAt)
+	})
 
 
 	response := []chirp{}
